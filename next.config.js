@@ -27,7 +27,7 @@ const nextConfig = {
   webpack: (config) => {
     config.experiments = {
       asyncWebAssembly: true,
-      layers: true, // ← ADD THIS
+      layers: true,
     };
 
     config.resolve.fallback = {
@@ -36,9 +36,18 @@ const nextConfig = {
       crypto: false,
     };
 
+    // Ignore onnxruntime server-side warnings
+    config.ignoreWarnings = [
+      {
+        module: /onnxruntime-web[\\/].*\.js$/,
+        message: /Critical dependency: require function is used/,
+      },
+    ];
+
     return config;
   },
 };
 
 module.exports = nextConfig;
+
 
