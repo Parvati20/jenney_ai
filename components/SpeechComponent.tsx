@@ -55,6 +55,8 @@ export default function SpeechComponent({ onReady, isAuthorized, onLogout }: Spe
   const sharedAudioPlayerRef = useRef<any>(null);
 
   // Initialize TTS
+
+  
   useEffect(() => {
     async function initTTS() {
       try {
