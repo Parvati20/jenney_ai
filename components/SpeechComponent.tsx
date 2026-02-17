@@ -256,6 +256,7 @@ export default function SpeechComponent({ onReady, isAuthorized, onLogout }: Spe
           }, 150);
         }
       };
+  
       playVideo();
     } else {
       // Pause video when AI stops speaking
