@@ -341,7 +341,7 @@ export default function SpeechComponent({ onReady, isAuthorized, onLogout }: Spe
       // Synthesize remaining chunks in parallel for smooth flow
       restChunks.forEach((chunk, index) => {
         const chunkIndex = index + 1;
-        ttsRef.current.synthesize(chunk).then((result) => {
+        ttsRef.current?.synthesize(chunk).then((result) => {
           sharedAudioPlayer.addAudioIntoQueue(result.audio, result.sampleRate);
 
           // Only set end timer on last chunk
