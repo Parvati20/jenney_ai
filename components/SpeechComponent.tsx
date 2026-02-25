@@ -12,52 +12,74 @@ interface SpeechComponentProps {
 }
 
 export default function SpeechComponent({ onReady, isAuthorized, onLogout }: SpeechComponentProps) {
+  // --- FIX: Ensure these are always defined for modal logic ---
+  const isWordChainMode = false;
+  const isStoryMode = false;
+  // --- FIX: messagesEndRef for chat scroll ---
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const { data: session } = useSession();
+
+  /** ------------------ STATE ------------------ **/
   const [isReady, setIsReady] = useState(false);
   const [isListening, setIsListening] = useState(false);
-  const [messages, setMessages] = useState<Array<{ role: string; content: string }>>([]);
-  const [currentResponse, setCurrentResponse] = useState<string>("");
-  const [showHistory, setShowHistory] = useState(false);
-  const [isThinking, setIsThinking] = useState(false);
-  const [showThinking, setShowThinking] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
+  const [messages, setMessages] = useState<{ role: string; content: string }[]>([]);
+  const [displayedText, setDisplayedText] = useState<string>("");
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isGreeting, setIsGreeting] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [isThinking, setIsThinking] = useState(false); 
+  const [showThinking, setShowThinking] = useState(false); // ✅ ye must
   const [isDarkMode, setIsDarkMode] = useState(false);
-  const [showProfile, setShowProfile] = useState(false);
   const resolvedAuthorized = isAuthorized ?? true;
-  const hasShownWelcomeRef = useRef(false);
-  const isDisplayingWelcomeRef = useRef(false);
-  const [displayName, setDisplayName] = useState<string>("");
-  const [userEmail, setUserEmail] = useState<string>("");
-  const [userImage, setUserImage] = useState<string>("");
-  const [hasStartedLetterMode, setHasStartedLetterMode] = useState(false);
-  const [isWordChainMode, setIsWordChainMode] = useState(false);
-  const [isStoryMode, setIsStoryMode] = useState(false);
-  const [displayedText, setDisplayedText] = useState<string>("");
-  const textTimersRef = useRef<number[]>([]);
-  const speechStateTimersRef = useRef<number[]>([]);
-  const speechQueueEndTimeRef = useRef<number>(0);
-  const speakingCountRef = useRef<number>(0);
-  const thinkingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const usedWordsRef = useRef<Set<string>>(new Set());
-  const lastAiWordRef = useRef<string>("");
+
+  const [displayName, setDisplayName] = useState("");
+  const [userEmail, setUserEmail] = useState("");
+  const [userImage, setUserImage] = useState("");
   
+
+  /** ------------------ REFS ------------------ **/
   const ttsRef = useRef<TTSLogic | null>(null);
   const sttRef = useRef<STTLogic | null>(null);
   const lastTranscriptRef = useRef<string>("");
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const messagesRef = useRef<Array<{ role: string; content: string }>>([]);
-  const requestQueueRef = useRef(Promise.resolve());
-  const speechQueueRef = useRef(Promise.resolve());
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const audioElementRef = useRef<HTMLAudioElement | null>(null);
-  const isPlayingVideoRef = useRef<boolean>(false);
+
   const sharedAudioPlayerRef = useRef<any>(null);
-  const hasWarmedRef = useRef<boolean>(false);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
 
-  // Initialize TTS
+  const hasShownWelcomeRef = useRef(false);
+  const isDisplayingWelcomeRef = useRef(false);
+  const hasWarmedRef = useRef(false);
 
+  const messagesRef = useRef(messages);
+  const speechQueueRef = useRef(Promise.resolve());
+  const speakingCountRef = useRef(0);
+  const speechStateTimersRef = useRef<number[]>([]);
+
+  /** ------------------ HELPERS ------------------ **/
+
+  const beginSpeaking = () => {
+    speakingCountRef.current += 1;
+    if (speakingCountRef.current === 1) setIsSpeaking(true);
+  };
+
+  const endSpeaking = () => {
+    speakingCountRef.current = Math.max(0, speakingCountRef.current - 1);
+    if (speakingCountRef.current === 0) {
+      setIsSpeaking(false);
+      if (isDisplayingWelcomeRef.current) isDisplayingWelcomeRef.current = false;
+    }
+  };
+
+  const enqueueSpeech = (text: string) => {
+    if (!text.trim()) return speechQueueRef.current;
+    speechQueueRef.current = speechQueueRef.current
+      .then(() => speak(text))
+      .catch((error) => console.error("Speech queue failed:", error));
+    return speechQueueRef.current;
+  };
   
+
+  /** ------------------ TTS ------------------ **/
   useEffect(() => {
     async function initTTS() {
       try {
@@ -68,42 +90,160 @@ export default function SpeechComponent({ onReady, isAuthorized, onLogout }: Spe
 
         ttsRef.current = new TTSLogic({ voiceId: "en_US-hfc_female-medium" });
         await ttsRef.current.initialize();
-        
+
         setIsReady(true);
-        if (onReady) onReady(true);
+        onReady?.(true);
       } catch (error) {
         console.error("TTS initialization failed:", error);
       }
     }
 
     initTTS();
-    return () => {
-      ttsRef.current?.dispose();
-    };
+    return () => ttsRef.current?.dispose();
   }, [onReady]);
 
-  useEffect(() => {
-    if (!resolvedAuthorized || hasWarmedRef.current) return;
-    hasWarmedRef.current = true;
-    fetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        messages: [
-          { role: "system", content: JENNY_SYSTEM_PROMPT },
-          { role: "user", content: "Hi" }
-        ],
-        temperature: 0.2,
-        top_p: 0.5,
-        max_tokens: 1,
-        stream: false
-      })
-    }).catch(() => {
-      // warm-up is best-effort
-    });
-  }, [resolvedAuthorized]);
+  const speak = async (text: string) => {
+    if (!ttsRef.current || !sharedAudioPlayerRef.current || !text.trim()) return;
 
-  // Load user data from session
+    const sharedAudioPlayer = sharedAudioPlayerRef.current;
+    const textForSpeech = text.replace(/\p{Extended_Pictographic}/gu, "").replace(/\s+/g, " ").trim();
+    if (!textForSpeech) return;
+
+    try {
+      const words = textForSpeech.split(/\s+/);
+      const chunkSize = 5;
+      const chunks: string[] = [];
+      for (let i = 0; i < words.length; i += chunkSize) {
+        chunks.push(words.slice(i, i + chunkSize).join(" "));
+      }
+
+      let hasStartedSpeech = false;
+      const startSpeechNow = () => {
+        if (!hasStartedSpeech) {
+          hasStartedSpeech = true;
+          beginSpeaking();
+        }
+      };
+
+      const estimatedDurationsMs = chunks.map((chunk) => Math.max(0.5, chunk.split(/\s+/).length * 0.22) * 1000);
+      const totalDurationMs = estimatedDurationsMs.reduce((sum, ms) => sum + ms, 0);
+
+      // First chunk immediately
+      const firstChunk = chunks[0];
+      const restChunks = chunks.slice(1);
+
+      const firstResult = await ttsRef.current.synthesize(firstChunk);
+      startSpeechNow();
+      sharedAudioPlayer.addAudioIntoQueue(firstResult.audio, firstResult.sampleRate);
+
+      restChunks.forEach((chunk, index) => {
+        const chunkIndex = index + 1;
+        ttsRef.current?.synthesize(chunk).then((result) => {
+          sharedAudioPlayer.addAudioIntoQueue(result.audio, result.sampleRate);
+          if (chunkIndex === chunks.length - 1) {
+            const endTimerId = window.setTimeout(() => endSpeaking(), totalDurationMs);
+            speechStateTimersRef.current.push(endTimerId);
+          }
+        }).catch((error) => console.error("Chunk synthesis failed:", error));
+      });
+
+      if (chunks.length === 1) {
+        const endTimerId = window.setTimeout(() => endSpeaking(), totalDurationMs);
+        speechStateTimersRef.current.push(endTimerId);
+      }
+    } catch (error) {
+      console.error("Speech synthesis failed:", error);
+      endSpeaking();
+    }
+  };
+
+  /** ------------------ STT ------------------ **/
+  useEffect(() => {
+    let isMounted = true;
+
+    async function initSTT() {
+      try {
+        const { STTLogic } = await import("speech-to-speech");
+        if (!isMounted) return;
+
+        const stt = new STTLogic(
+          (msg, level) => console.log(`[STT ${level ?? "info"}] ${msg}`),
+          (transcript) => (lastTranscriptRef.current = transcript),
+          { sessionDurationMs: 20000, interimSaveIntervalMs: 500 }
+        );
+
+        stt.setVadCallbacks(
+          () => {
+            setIsListening(true);
+            videoRef.current?.pause();
+          },
+          async () => {
+            const transcript = lastTranscriptRef.current.trim() || stt.getFullTranscript().trim();
+            lastTranscriptRef.current = "";
+            stt.clearTranscript();
+            setIsListening(false);
+            if (transcript) await handleUserMessage(transcript);
+          }
+        );
+
+        sttRef.current = stt;
+      } catch (error) {
+        console.error("STT initialization failed:", error);
+      }
+    }
+
+    initSTT();
+    return () => {
+      isMounted = false;
+      sttRef.current?.destroy();
+    };
+  }, []);
+
+  const startListening = () => {
+    if (!sttRef.current || isListening) return;
+    try { sttRef.current.start(); setIsListening(true); }
+    catch (err) { console.error("Start listening failed:", err); }
+  };
+
+  const stopListening = () => {
+    if (!sttRef.current) return;
+    try { sttRef.current.stop(); setIsListening(false); }
+    catch (err) { console.error("Stop listening failed:", err); }
+  };
+
+  /** ------------------ CHAT HANDLER ------------------ **/
+  const handleUserMessage = async (text: string) => {
+    if (!text?.trim()) return;
+
+    const updatedMessages = [...(messagesRef.current || []), { role: "user", content: text }];
+    setMessages(updatedMessages);
+    messagesRef.current = updatedMessages;
+
+    try {
+      const requestBody = { messages: [{ role: "system", content: JENNY_SYSTEM_PROMPT }, ...updatedMessages], temperature: 0.7, max_tokens: 200, stream: false };
+      console.log("🔥 Sending to API:", requestBody);
+
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody)
+      });
+
+      const data = await response.json();
+      if (!response.ok) { console.error("❌ API Error:", data); return; }
+
+      const assistantMessage = data?.choices?.[0]?.message?.content || "Sorry, I didn't understand.";
+      const finalMessages = [...updatedMessages, { role: "assistant", content: assistantMessage }];
+      setMessages(finalMessages);
+      messagesRef.current = finalMessages;
+
+      await speak(assistantMessage);
+    } catch (err) {
+      console.error("❌ Fetch failed:", err);
+    }
+  };
+
+  /** ------------------ WELCOME ------------------ **/
   useEffect(() => {
     if (!resolvedAuthorized) return;
     const name = session?.user?.name || "";
@@ -121,114 +261,13 @@ export default function SpeechComponent({ onReady, isAuthorized, onLogout }: Spe
       isDisplayingWelcomeRef.current = true;
       setIsGreeting(true);
       setTimeout(() => setIsGreeting(false), 3000);
-      // Video will start automatically when audio is ready
-      speak(welcomeMsg);
+      enqueueSpeech(welcomeMsg);
     }
   }, [resolvedAuthorized, session?.user?.name]);
 
-  // Reset welcome flag when user logs out
-  useEffect(() => {
-    if (!session) {
-      hasShownWelcomeRef.current = false;
-    }
-  }, [session]);
+  useEffect(() => { if (!session) hasShownWelcomeRef.current = false; }, [session]);
 
-  // Initialize Speech-to-Text
-  useEffect(() => {
-    let isMounted = true;
-
-    async function initSTT() {
-      try {
-        const { STTLogic } = await import("speech-to-speech");
-        if (!isMounted) return;
-
-        const stt = new STTLogic(
-          (msg, level) => console.log(`[STT ${level ?? "info"}] ${msg}`),
-          (transcript) => {
-            lastTranscriptRef.current = transcript;
-          },
-          {
-            sessionDurationMs: 2000,
-            interimSaveIntervalMs: 250,
-          }
-        );
-
-        stt.setVadCallbacks(
-          () => {
-            setIsListening(true);
-            if (videoRef.current) {
-              videoRef.current.pause();
-            }
-          },
-          async () => {
-            const transcript =
-              lastTranscriptRef.current.trim() || stt.getFullTranscript().trim();
-            lastTranscriptRef.current = "";
-            stt.clearTranscript();
-            setIsListening(false);
-            if (transcript.length > 0) {
-              await handleUserMessage(transcript);
-            }
-          }
-        );
-
-        sttRef.current = stt;
-      } catch (error) {
-        console.error("STT initialization failed:", error);
-      }
-    }
-
-    initSTT();
-    return () => {
-      isMounted = false;
-      sttRef.current?.destroy();
-    };
-  }, []);
-
-  // Scroll to bottom when messages change
-  useEffect(() => {
-    if (showHistory) {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    }
-  }, [messages, showHistory]);
-
-  useEffect(() => {
-    messagesRef.current = messages;
-  }, [messages]);
-
-  const clearTextTimers = () => {
-    if (textTimersRef.current.length > 0) {
-      textTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
-      textTimersRef.current = [];
-    }
-  };
-
-  const waitForNextPaint = () => new Promise<void>((resolve) => {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => resolve());
-    });
-  });
-
-  const beginSpeaking = () => {
-    speakingCountRef.current += 1;
-    if (speakingCountRef.current === 1) {
-      setIsSpeaking(true);
-    }
-  };
-
-  const endSpeaking = () => {
-    speakingCountRef.current = Math.max(0, speakingCountRef.current - 1);
-    if (speakingCountRef.current === 0) {
-      setIsSpeaking(false);
-      // IMPORTANT: Keep text visible until user action
-      // Only reset welcome display flag when speech ends
-      if (isDisplayingWelcomeRef.current) {
-        isDisplayingWelcomeRef.current = false;
-      }
-    }
-  };
-
-  // Control video playback - sync with speech
+  /** ------------------ VIDEO CONTROL ------------------ **/
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -237,449 +276,36 @@ export default function SpeechComponent({ onReady, isAuthorized, onLogout }: Spe
     video.playbackRate = 1;
 
     if (isSpeaking) {
-      // Play video when AI is speaking
-      const playVideo = async () => {
-        try {
-          await video.play();
-          isPlayingVideoRef.current = true;
-          console.log("✅ Video playing - AI speaking");
-        } catch (err) {
-          console.error("❌ Video play failed:", err);
-          // Retry once after short delay
-          setTimeout(async () => {
-            try {
-              await video.play();
-              console.log("✅ Video playing after retry");
-            } catch (e) {
-              console.error("❌ Retry failed:", e);
-            }
-          }, 150);
-        }
-      };
-  
-      playVideo();
+      video.play().catch(() => setTimeout(() => video.play().catch(() => {}), 150));
     } else {
-      // Pause video when AI stops speaking
-      if (!video.paused) {
-        video.pause();
-        console.log("⏸️ Video paused - AI silent");
-      }
-      isPlayingVideoRef.current = false;
+      if (!video.paused) video.pause();
     }
   }, [isSpeaking]);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    
-    // Preload entire video for instant playback - run only once
     video.preload = "auto";
     video.load();
-    
-    console.log("✅ Video initialized and loaded");
-  }, []); // Empty deps - run only once on mount
-  const speak = async (text: string) => {
-    if (!resolvedAuthorized) return;
-    
-    if (!ttsRef.current) return;
-    
-    const sharedAudioPlayer = sharedAudioPlayerRef.current;
-    if (!sharedAudioPlayer) return;
-    
-    try {
-      // Prepare text for natural, clear speech without breaking words
-      const textForSpeech = text
-        .replace(/\p{Extended_Pictographic}/gu, "") // Remove emojis
-        // Preserve contractions by replacing apostrophes with safe marker temporarily
-        .replace(/([a-z])'([a-z])/gi, "$1APOSTROPHE$2")
-        // Remove ALL punctuation that causes pauses or breaks
-        .replace(/[.,!?;:—–\-()\[\]{}]/g, " ")
-        .replace(/["""''`]/g, " ") // Remove all quote marks
-        .replace(/[/\\|]/g, " ") // Remove slashes and pipes
-        // Restore contractions
-        .replace(/APOSTROPHE/g, "'")
-        // Clean up any remaining special characters except apostrophes in contractions
-        .replace(/[^\w\s']/g, " ")
-        // Normalize all whitespace to single spaces for smooth flow
-        .replace(/\s+/g, " ")
-        .trim();
-      
-      if (!textForSpeech) return;
-      
-      // Use larger chunks for smooth continuous speech without gaps
-      const words = textForSpeech.split(/\s+/);
-      const chunkSize = 5; // Larger chunks = smoother speech, fewer transitions
-      const chunks = [];
-      
-      for (let i = 0; i < words.length; i += chunkSize) {
-        chunks.push(words.slice(i, i + chunkSize).join(" "));
-      }
-      
-      // Start video+speaking exactly when first audio is ready
-      let hasStartedSpeech = false;
-      const startSpeechNow = () => {
-        if (!hasStartedSpeech) {
-          hasStartedSpeech = true;
-          beginSpeaking();
-        }
-      };
-      
-      // Calculate total duration for smooth timing
-      const estimatedDurationsMs = chunks.map((chunk) =>
-        Math.max(0.5, chunk.split(/\s+/).length * 0.22) * 1000
-      );
-      const totalDurationMs = estimatedDurationsMs.reduce((sum, ms) => sum + ms, 0);
+  }, []);
 
-      // Synthesize first chunk immediately for fast start
-      const firstChunk = chunks[0];
-      const restChunks = chunks.slice(1);
-
-      const firstResult = await ttsRef.current.synthesize(firstChunk);
-      startSpeechNow(); // Start video immediately when audio is ready
-      sharedAudioPlayer.addAudioIntoQueue(firstResult.audio, firstResult.sampleRate);
-
-      // Synthesize remaining chunks in parallel for smooth flow
-      restChunks.forEach((chunk, index) => {
-        const chunkIndex = index + 1;
-        ttsRef.current?.synthesize(chunk).then((result) => {
-          sharedAudioPlayer.addAudioIntoQueue(result.audio, result.sampleRate);
-
-          // Only set end timer on last chunk
-          if (chunkIndex === chunks.length - 1) {
-            const endTimerId = window.setTimeout(() => {
-              endSpeaking(); // Stop video exactly when speech ends
-            }, totalDurationMs);
-            speechStateTimersRef.current.push(endTimerId);
-          }
-        }).catch((error) => {
-          console.error("Chunk synthesis failed:", error);
-        });
-      });
-
-      // Handle single-chunk case end timer
-      if (chunks.length === 1) {
-        const endTimerId = window.setTimeout(() => {
-          endSpeaking();
-        }, totalDurationMs);
-        speechStateTimersRef.current.push(endTimerId);
-      }
-    } catch (error) {
-      console.error("Speech synthesis failed:", error);
-      endSpeaking();
-    }
-  };
-
-  const enqueueSpeech = (text: string) => {
-    if (!text.trim()) return speechQueueRef.current;
-    speechQueueRef.current = speechQueueRef.current.then(() => speak(text)).catch((error) => {
-      console.error("Speech queue failed:", error);
-    });
-    return speechQueueRef.current;
-  };
-
-  const startListening = () => {
-    if (!resolvedAuthorized) return;
-    if (sttRef.current && !isListening) {
-      setIsListening(true);
-      if (videoRef.current) {
-        videoRef.current.pause();
-      }
-      sttRef.current.start();
-      setTimeout(async () => {
-        sttRef.current?.stop();
-        setIsListening(false);
-        const transcript = lastTranscriptRef.current.trim();
-        if (transcript.length > 0) {
-          lastTranscriptRef.current = "";
-          await handleUserMessage(transcript);
-        }
-      }, 2000);
-    }
-  };
-
-  const stopListening = () => {
-    if (sttRef.current && isListening) {
-      sttRef.current.stop();
-      setIsListening(false);
-    }
-  };
-
-  const enqueueRequest = (task: () => Promise<void>) => {
-    const currentTask = task().catch((error) => {
-      console.error("Queued request failed:", error);
-    });
-    requestQueueRef.current = currentTask;
-    return currentTask;
-  };
-
-  const normalizeWord = (word: string) => word.toLowerCase().replace(/[^a-z]/g, "");
-
-  const extractFirstWord = (text: string) => {
-    const match = text.match(/[A-Za-z]+/);
-    return match ? match[0] : "";
-  };
-
-
-  const handleUserMessage = async (text: string) => {
-    return enqueueRequest(async () => {
-      if (!resolvedAuthorized) return;
-      const isWordChainSelected = /\bword\s*chain\b/i.test(text);
-      const isOtherGameSelected = /\b(rapid\s*fire|riddle\s*game|act\s*and\s*guess|memory\s*game)\b/i.test(text);
-      const isStoryChoice = /\b(magic\s*story|jungle\s*adventure|choose\s*your\s*story|finish\s*the\s*story|bedtime\s*story)\b/i.test(text);
-      if (isWordChainSelected) {
-        setIsWordChainMode(true);
-        setShowHistory(false);
-        usedWordsRef.current = new Set();
-        lastAiWordRef.current = "";
-      } else if (isOtherGameSelected) {
-        setIsWordChainMode(false);
-      }
-      if (isStoryChoice) {
-        setIsStoryMode(true);
-        setShowHistory(false);
-      }
-      const isGreetingText = /^(hi|hello|hey)\b/i.test(text.trim());
-      if (isGreetingText) {
-        setIsGreeting(true);
-        setTimeout(() => setIsGreeting(false), 1500);
-      }
-      const baseMessages = messagesRef.current;
-      const newMessages = [...baseMessages, { role: "user", content: text }];
-      setMessages(newMessages);
-      if (thinkingTimerRef.current) {
-        clearTimeout(thinkingTimerRef.current);
-        thinkingTimerRef.current = null;
-      }
-      setIsThinking(true);
-      setShowThinking(false);
-      clearTextTimers();
-      setDisplayedText("");
-
-      try {
-        const isWordChainActive = isWordChainSelected || (isWordChainMode && !isOtherGameSelected && !isStoryChoice);
-        const userWord = normalizeWord(extractFirstWord(text));
-        if (isWordChainActive && userWord) {
-          usedWordsRef.current.add(userWord);
-        }
-
-        const wordChainLetter = isWordChainActive
-          ? (userWord ? userWord.slice(-1) : lastAiWordRef.current.slice(-1))
-          : "";
-        const usedWords = isWordChainActive ? Array.from(usedWordsRef.current).slice(0, 80) : [];
-
-        const wordChainSystem = isWordChainActive
-          ? `WORD CHAIN MODE. Output exactly ONE word only. No extra text, no punctuation, no emoji. The word must start with letter: "${wordChainLetter || "any"}". Do NOT repeat any used words: ${usedWords.join(", ") || "(none)"}. If starting the game, output a single easy word.`
-          : null;
-
-        const response = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            messages: [
-              { role: "system", content: JENNY_SYSTEM_PROMPT },
-              ...(wordChainSystem ? [{ role: "system", content: wordChainSystem }] : []),
-              ...newMessages
-            ],
-            temperature: 0.7,
-            top_p: 0.9,
-            max_tokens: 45,
-            presence_penalty: 0.1,
-            frequency_penalty: 0.1,
-            stream: true
-          })
-        });
-
-        if (!response.ok || !response.body) {
-          const data = await response.json().catch(() => ({}));
-          const errorText = data?.details || data?.error || "API error";
-          throw new Error(errorText);
-        }
-
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let assistantMessage = "";
-        let pendingSpeech = "";
-        let lastUiUpdate = 0;
-        let thinkingCleared = false;
-        let done = false;
-
-        const canStreamSpeech = !isWordChainActive;
-        const getSpeakableChunk = (text: string) => {
-          const sentenceMatch = text.match(/^(.*?[.!?])\s+/);
-          if (sentenceMatch) return sentenceMatch[1];
-          const words = text.trim().split(/\s+/);
-          if (words.length >= 5) return words.slice(0, 5).join(" ");
-          return "";
-        };
-
-        const flushSpeechChunk = (force = false) => {
-          if (!canStreamSpeech) return;
-          if (!pendingSpeech.trim()) return;
-          const chunk = force ? pendingSpeech.trim() : getSpeakableChunk(pendingSpeech);
-          if (!chunk) return;
-          pendingSpeech = pendingSpeech.slice(chunk.length).trimStart();
-          enqueueSpeech(chunk);
-        };
-
-        // Step 1: Stream response and update UI immediately
-        while (!done) {
-          const { value, done: streamDone } = await reader.read();
-          done = streamDone;
-          if (value) {
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop() || "";
-            for (const line of lines) {
-              const trimmed = line.trim();
-              if (!trimmed.startsWith("data:")) continue;
-              const dataStr = trimmed.replace("data:", "").trim();
-              if (dataStr === "[DONE]") {
-                done = true;
-                break;
-              }
-              try {
-                const json = JSON.parse(dataStr);
-                const delta = json?.choices?.[0]?.delta?.content || json?.choices?.[0]?.message?.content || "";
-                if (delta) {
-                  assistantMessage += delta;
-                  pendingSpeech += delta;
-                  const now = performance.now();
-                  if (now - lastUiUpdate > 80) {
-                    setDisplayedText(assistantMessage);
-                    setCurrentResponse(assistantMessage);
-                    lastUiUpdate = now;
-                  }
-                  if (!thinkingCleared) {
-                    thinkingCleared = true;
-                    if (thinkingTimerRef.current) {
-                      clearTimeout(thinkingTimerRef.current);
-                      thinkingTimerRef.current = null;
-                    }
-                    setShowThinking(false);
-                  }
-                  flushSpeechChunk(false);
-                }
-              } catch {
-                // ignore malformed chunks
-              }
-            }
-          }
-        }
-
-        flushSpeechChunk(true);
-
-        // Step 2: Streaming complete - validate we have a complete response
-        if (!assistantMessage) {
-          throw new Error("No response from model");
-        }
-
-        // Clear thinking state
-        if (thinkingTimerRef.current) {
-          clearTimeout(thinkingTimerRef.current);
-          thinkingTimerRef.current = null;
-        }
-        setShowThinking(false);
-        
-        // Step 3: Display the COMPLETE text (final)
-        setMessages([...newMessages, { role: "assistant", content: assistantMessage }]);
-        setCurrentResponse(assistantMessage);
-        setDisplayedText(assistantMessage);
-
-        // Step 4: If speech did not start during streaming, speak now
-        if (assistantMessage.trim().length > 0 && !canStreamSpeech) {
-          enqueueSpeech(assistantMessage.trim());
-        }
-
-        // Update word chain tracking if active
-        if (isWordChainSelected || (isWordChainMode && !isOtherGameSelected && !isStoryChoice)) {
-          const aiWord = normalizeWord(extractFirstWord(assistantMessage));
-          if (aiWord) {
-            usedWordsRef.current.add(aiWord);
-            lastAiWordRef.current = aiWord;
-          }
-        }
-        setIsThinking(false);
-
-        await speechQueueRef.current;
-      } catch (error) {
-        console.error("API call failed:", error);
-        if (thinkingTimerRef.current) {
-          clearTimeout(thinkingTimerRef.current);
-          thinkingTimerRef.current = null;
-        }
-        setShowThinking(false);
-        setIsThinking(false);
-        const errorMsg = error instanceof Error ? `Sorry, I couldn't process that. (${error.message})` : "Sorry, I couldn't process that. Please try again!";
-        setMessages([...newMessages, { role: "assistant", content: errorMsg }]);
-        setCurrentResponse(errorMsg);
-        clearTextTimers();
-        setDisplayedText(errorMsg);
-        await speak(errorMsg);
-      }
-    });
-  };
-
-  const handleBoxClick = async (label: string) => {
-    if (!resolvedAuthorized) return;
-    if (isThinking) return;
-    if (label === "MODE: Letter Fun" && !hasStartedLetterMode) {
-      setIsWordChainMode(false);
-      setIsStoryMode(false);
-      setIsGreeting(true);
-      setTimeout(() => setIsGreeting(false), 1500);
-      clearTextTimers();
-      const firstMessage =
-        "Yay! Welcome to Letter Fun 🎉\nWhat do you want to learn today?\nSay one option:\nMagic Letter ✨\nAnimal Calls the Letter 🐶\nSing and Stop Alphabet 🎵\nMystery Box Letter 🎁";
-      setHasStartedLetterMode(true);
-      setMessages([...messages, { role: "assistant", content: firstMessage }]);
-      setCurrentResponse(firstMessage);
-      setDisplayedText(firstMessage);
-      await waitForNextPaint();
-      speak(firstMessage);
-      return;
-    }
-    if (label === "MODE: GAME") {
-      setIsWordChainMode(false);
-      setIsStoryMode(false);
-      clearTextTimers();
-      const gameOptions =
-        "Awesome! Time to play games 🎮😄\nWhich game do you want to play?\n\nSay one option:\nWord Chain\nRapid Fire\nRiddle Game\nAct and Guess\nMemory Game 🧠✨";
-      setMessages([...messages, { role: "assistant", content: gameOptions }]);
-      setCurrentResponse(gameOptions);
-      setDisplayedText(gameOptions);
-      await waitForNextPaint();
-      speak(gameOptions);
-      return;
-    }
-    if (label === "MODE: STORY") {
-      setIsWordChainMode(false);
-      setIsStoryMode(true);
-      setShowHistory(false);
-      clearTextTimers();
-      const storyOptions =
-        "Yay! Story time 📖✨\nWhat kind of story do you want to hear?\n\nSay one option:\nMagic Story 🪄\nJungle Adventure 🌿\nChoose Your Story 🤔\nFinish the Story 🎤\nBedtime Story 🌙";
-      setMessages([...messages, { role: "assistant", content: storyOptions }]);
-      setCurrentResponse(storyOptions);
-      setDisplayedText(storyOptions);
-      await waitForNextPaint();
-      speak(storyOptions);
-      return;
-    }
-    handleUserMessage(label);
-  };
-
-  const getWordChainDisplay = (text: string) => {
-    const words = text.match(/[A-Za-z]+/g);
-    if (!words || words.length === 0) return text.trim();
-    return words[words.length - 1];
-  };
-
-  const displayResponse = isWordChainMode
-    ? getWordChainDisplay(currentResponse || "")
-    : currentResponse;
-
-  return (
+  /** ------------------ WARM-UP ------------------ **/
+  useEffect(() => {
+    if (!resolvedAuthorized || hasWarmedRef.current) return;
+    hasWarmedRef.current = true;
+    fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messages: [{ role: "system", content: JENNY_SYSTEM_PROMPT }, { role: "user", content: "Hi" }],
+        temperature: 0.2,
+        top_p: 0.5,
+        max_tokens: 1,
+        stream: false
+      })
+    }).catch(() => {});
+  }, [resolvedAuthorized]);
+return (
     <div className={`flex min-h-screen transition-colors duration-300 ${isDarkMode ? 'bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900' : 'bg-gradient-to-br from-indigo-100 via-purple-50 to-pink-100'} relative overflow-hidden`}>
       
       {/* Sidebar */}
@@ -904,34 +530,6 @@ export default function SpeechComponent({ onReady, isAuthorized, onLogout }: Spe
             </div>
           </div>
         </div>
-
-        {/* Learning Boxes */}
-        <div className="px-6 pb-6 relative z-10">
-          <div className="max-w-4xl mx-auto grid grid-cols-1 sm:grid-cols-3 gap-8">
-            {[
-              { label: "Letter Fun", emoji: "🅰️", color: "from-pink-400 to-pink-500", payload: "MODE: Letter Fun" },
-              { label: "Play Games", emoji: "🎮", color: "from-green-400 to-emerald-500", payload: "MODE: GAME" },
-              { label: "Story", emoji: "📖", color: "from-blue-400 to-sky-500", payload: "MODE: STORY" },
-            ].map((item) => (
-              <button
-                key={item.label}
-                onClick={() => handleBoxClick(item.payload)}
-                disabled={!resolvedAuthorized}
-                className={`group rounded-[40px] p-10 bg-gradient-to-br ${item.color} text-white transition-all duration-500 hover:scale-105 hover:-translate-y-3 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed transform relative overflow-hidden backdrop-blur-sm border-2 border-white/30`}
-                style={{
-                  boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.4), 0 10px 30px rgba(0, 0, 0, 0.3), inset 0 2px 10px rgba(255, 255, 255, 0.3)'
-                }}
-              >
-                {/* Shine Effect */}
-                <div className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/30 to-white/0 -translate-x-full group-hover:translate-x-full transition-transform duration-700"></div>
-                
-                <div className="text-6xl mb-5 transition-transform duration-500 group-hover:scale-125 group-hover:rotate-12 drop-shadow-2xl relative z-10 animate-bounce">{item.emoji}</div>
-                <div className="font-bold text-3xl drop-shadow-lg relative z-10 tracking-wide">{item.label}</div>
-              </button>
-            ))}
-          </div>
-        </div>
-
         {/* Premium Floating Mic Button */}
         <div className="pb-10 flex justify-center relative z-10">
           <button

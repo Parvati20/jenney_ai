@@ -14,7 +14,7 @@ export default function Home() {
       return;
     }
     if (status === "unauthenticated") {
-      router.replace("/login");
+      router.replace("/api/auth/signin");
     }
   }, [router, status]);
 
